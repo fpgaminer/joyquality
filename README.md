@@ -37,6 +37,194 @@ Finally, the so400m architecture doesn't crop input images, unlike CLIP, which m
 
 ## Usage
 
+I highly recommend tuning the model on your own set of preference pairs.  JoyQuality is designed to be finetuned and, importantly, everyone grades things differently.  All you need is image-vs-image comparisons with one labelled as a "winner".  I'd recommend 2k minimum for great results, though you can certainly get decent results with less.
+
+### Finetuning
+
+**WARNING** Usage is a PITA right now. The training script is total garbage until I can clean it up and make it friendlier.
+
+For the current training script you need your dataset in this format:
+
+```
+{
+  "train": [
+    [
+      "/example/path/train/imageA1.jpg",
+      "/example/path/train/imageA2.jpg",
+      1
+    ],
+    [
+      "/example/path/train/imageB1.jpg",
+      "/example/path/train/imageB2.jpg",
+      1
+    ],
+    [
+      "/example/path/train/imageC1.jpg",
+      "/example/path/train/imageC2.jpg",
+      1
+    ]
+  ],
+  "test": [
+    [
+      "/example/path/test/imageX1.jpg",
+      "/example/path/test/imageX2.jpg",
+      1
+    ],
+    [
+      "/example/path/test/imageY1.jpg",
+      "/example/path/test/imageY2.jpg",
+      1
+    ]
+  ]
+}
+```
+
+Basically two paths for each entry plus a label.  **For now the training script only supports the winning image being the first image and it ignores the label.**  Your images don't have to be a particular size/format/etc, as long as PIL can load them.  The general rule of thumb is to have 10% test data.
+
+Then you can run the training script like this:
+
+`python train.py lr_scheduler=onecycle learning_rate=0.008 warmup_samples=1500 batch_size=256 total_samples=20000 model=So400m512 base_checkpoint=o8eg1n4c.safetensors dataset=your-dataset.json wandb_project=... device_batch_size=4`
+
+Those are the settings I found to work best for my personal preference dataset which has about 6k pairs in it.  The model both learns quickly and overfits quickly, so if your dataset is smaller definitely decrease `total_samples`.  You'll want to adjust `device_batch_size` based on how much GPU memory you have (it doesn't have any effect on the real batch size; the script automatically accumulates to reach the target).
+
+`cosine` schedule is the "standard", but at least in my case `onecycle` edge out ahead.  One Cycle tends to work quite well for low data, high repeat regimes.  Though expect to adjust the learning rate if you switch the schedule.
+
+### Inference
+
+The [score_images.py](./score_images.py) script gives an example of how to use the model during inference.  In my case I use a SQL database to keep track of everything, so the script is set up that way.  But your setup will likely be different.  Adjust as needed.
+
+The model outputs a "latent score" for each image.  I'll just call it the image's score.  It's an unscaled, unbiased number, which means it doesn't really "mean" anything out of context.  You can compare two images by doing:
+
+`sigmoid(image_a_score - image_b_score)`
+
+That results in a value between 0.0 and 1.0 which represent the probability that Image A would beat Image B in a contest.
+
+If you have a dataset of images you can also use the scores to just directly rank them all from best to worst.  Just sort by their scores.  The best image will have the highest score; the worst the lowest.
+
+Many text-to-image diffusion training processes want images graded into things like "worst quality", "low quality", "average quality", "high quality", "best quality", etc.  You can use the score to do this as well!  To do that you just have to break up the range of scores in your dataset into distinct buckets from best to worst.  So, first score all your images.  Then use one of two approaches to convert the scores into discrete "ranks."
+
+#### Ranking Method A
+
+This is the simple approach.  Get the min and max score in your dataset and divide the range evenly by however many buckets you need.  Done!  If you're training a text-to-image model this simple method helps ensure that each quality is equally represented, which can help the model learn those signals more robustly.
+
+The downside is that if your dataset is highly imbalanced, this method will be imperfect.  i.e. the upper 10% of images in your dataset might not all be high quality.  Yet if you divide the range evenly by 10 buckets then all those images will be labelled high quality.
+
+#### Ranking Method B
+
+This method is a little more complicated, but the goal is to help preserve the relative probabilities that the model natively spits out.  As you may recall from above, you can compare two images using the model's score, and get a probability that Image A beats Image B.  i.e. it can tell you not only that Image A is better, but by _how much_.  Method B helps preserve this information and thus better handles highly imbalanced datasets.  That way each bucket will genuinely contain images of related overall quality.  No "very high quality" bleeding into "best quality".
+
+So, method B uses this equation to calculate the rank of an image from its score:
+
+`rank = 10 * (1 / (1 + torch.exp(-(s - b) / tau)))`
+
+Where `s` is the score, and `b` and `tau` are parameters that get tuned to your specific dataset.  They're basically "scale" and "offset" variables.  What you'll need to tune those two parameters is a small validation set of preferences.  If you finetuned JoyQuality you can use the test set from there.  Otherwise just use a random subset of your dataset.  The optimization is the same as during finetuning, pushing the model to match your dataset's preferences, except now it's working to optimize tau.  After that `b` is found using a simple search.  All of this basically helps to calibrate the scores post-training and fit them into a global range of (0, 1).
+
+After tuning `tau` and `b` you can use the formula above, which will spit out a continuous rank between 0 and 10 for each image.  You can divide that up however you'd like.  In my case I have ten quality buckets, so I just do `int(rank)` and get ranks [0, 9] inclusive, which I later convert to text labels.
+
+Sound complicated?  Here's the code:
+
+```
+def fit_tau_torch(s: torch.Tensor, pairs: torch.Tensor, y: torch.Tensor, tau0: float = 1.0, steps: int = 200, lr: float = 0.1) -> float:
+	"""
+	Minimizes BCE(y, sigmoid((s_i - s_j) / tau)) over pairs to estimate tau.
+	"""
+	assert pairs.dtype == torch.long
+	assert pairs.ndim == 2 and pairs.shape[1] == 2
+	assert pairs.min() >= 0 and pairs.max() < s.shape[0]
+
+	# Parameterize tau > 0 as tau = exp(log_tau)
+	log_tau = torch.tensor([math.log(max(tau0, 1e-6))], dtype=torch.float32, requires_grad=True)
+	opt = torch.optim.Adam([log_tau], lr=lr)
+	
+	M = pairs.shape[0]
+
+	for t in range(steps):
+		si = s[pairs[:, 0]]
+		sj = s[pairs[:, 1]]
+		logits = (si - sj) / log_tau.exp()
+
+		loss = F.binary_cross_entropy_with_logits(logits, y.float(), reduction='mean')
+		opt.zero_grad(set_to_none=True)
+		loss.backward()
+		opt.step()
+
+		print(f"[{t+1:4d}/{steps}] loss={loss.item():.6f} tau={log_tau.exp().item():.6f}")
+
+	tau = float(log_tau.exp().item())
+	return tau
+
+
+def fit_tau_torch_lbfgs(s: torch.Tensor, pairs: torch.Tensor, y: torch.Tensor, tau0: float = 1.0, max_iter: int = 50) -> float:
+	# log_tau parameterization keeps tau > 0
+	log_tau = torch.tensor([math.log(max(tau0, 1e-6))], dtype=torch.float32, requires_grad=True)
+	opt = torch.optim.LBFGS([log_tau], max_iter=max_iter, line_search_fn="strong_wolfe")
+
+	si = s[pairs[:, 0]]
+	sj = s[pairs[:, 1]]
+
+	last_loss = None
+	def closure():
+		nonlocal last_loss
+		opt.zero_grad(set_to_none=True)
+		tau = log_tau.exp()
+		logits = (si - sj) / tau
+		loss = F.binary_cross_entropy_with_logits(logits, y.float(), reduction='mean')
+		loss.backward()
+		last_loss = loss.detach()
+		print(f"loss={loss.item():.6f} tau={tau.item():.6f}")
+		return loss
+
+	opt.step(closure)
+
+	return float(log_tau.exp().item())
+
+
+def solve_b_for_mean(s, tau, target_mean: float, iters: int = 50):
+	# find b such that mean(9 * sigmoid((s - b) / tau)) = target_mean
+	lo, hi = torch.min(s) - 10 * tau, torch.max(s) + 10 * tau
+
+	for _ in range(iters):
+		b = 0.5 * (lo + hi)
+		scores = 9 * (1 / (1 + torch.exp(-(s - b) / tau)))
+		if scores.mean() > target_mean:
+			lo = b
+		else:
+			hi = b
+		print(f"b in [{lo.item():.6f}, {hi.item():.6f}], mean score = {scores.mean().item():.6f}")
+
+		if hi - lo < 1e-6:
+			break
+	
+	return float(0.5 * (lo + hi))
+
+
+human_pairs = json.loads(Path("pairs-dataset-human.json").read_text())
+validation_pairs = human_pairs['test']
+validation_pairs = [(path_to_index[a], path_to_index[b]) for a, b, y in human_pairs['test']]
+validation_labels = [y for a, b, y in human_pairs['test']]
+
+print(f"# Validation pairs: {len(validation_pairs)}")
+
+# Prepare tensors
+s = torch.tensor([filehash_to_bt_score[fh] for fh in all_filehashes], dtype=torch.float32)
+pairs = torch.tensor(validation_pairs, dtype=torch.long)
+y = torch.tensor(validation_labels, dtype=torch.float32)
+
+# Solve for tau
+#tau = fit_tau_torch(s, pairs, y, lr=0.05)
+tau = fit_tau_torch_lbfgs(s, pairs, y)
+print(f"Fitted tau: {tau}")
+
+# Solve for b
+b = solve_b_for_mean(s, tau, target_mean=5.0)
+print(f"Solved b: {b}")
+
+# Compute ranks
+ranks = 10 * (1 / (1 + torch.exp(-(s - b) / tau)))
+
+print(f"Ranks stats: min={ranks.min().item():.6f}, max={ranks.max().item():.6f}, mean={ranks.mean().item():.6f}, std={ranks.std().item():.6f}")
+```
+
 
 ## What is Image Quality Assessment
 
@@ -66,7 +254,7 @@ In addition to finding the best performing LLM, I also spent a good amount of ti
 
 This prompt optimization process is very helpful when your runtime model is small (which, in this case, GPT-5 mini is).  The bigger models like GPT-5 Thinking and Claude Sonnet 4.5 are much, much better at infering things about your instructions.  So using them to expand upon a prompt and make it more detailed helps a lot in getting performance out of the smaller models.
 
-The optimized prompt used to build JoyQuality's dataset is available here: _______TODO______
+The optimized prompt used to build JoyQuality's dataset is available here: [DATASET_PROMPT13.py](./DATASET_PROMPT13.py)
 
 Much compute later and the dataset was ready.
 
