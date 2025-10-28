@@ -1,12 +1,14 @@
 # JoyQuality
 
-JoyQuality is an open source Image Quality Assessment (IQA) model.  It takes as input an image and gives as output a scalar score.  This score can be used to either globally rank an image (how good is this image compared to all images) or to pairwise compare it to another image.
+JoyQuality is an open source Image Quality Assessment (IQA) model.  It takes as input an image and gives as output a scalar score representing the overall quality of the image.  Highlights:
 
-This model can be used for:
-
-* Dataset filtering
-* Image quality tagging for training Text-to-Image models (e.g. labelling images as low quality, high quality, etc)
-* Probably more, I dunno.
+* Use for image dataset filtering.
+* Use for image quality tagging, such as for training text-to-image models.
+* Input size of 512x512.
+* 400M parameters.
+* Fast (200 images/s on a 300W H100).
+* A diverse and balanced dataset to ensure robust and adaptability.
+* Quickly learns new, tiny preference datasets.
 
 
 ## What's Cool About JoyQuality
@@ -17,20 +19,20 @@ Instead, you could train a model to do the scoring based on a small pairwise pre
 
 Additionally, training these types of models is surprisingly subtle.  Everything from: the selection of images to compare, which pairs of images to compare, building a non-poisoned validation set, metrics to measure model performance, etc.
 
-That's where JoyQuality steps in.  JoyQuality was trained on a broad, diverse array of images and 100k carefully selected pairwise preferences, while also being carefully tuned across a range of metrics to ensure robust performance.  By using JoyQuality as your base model, you can quickly build a small personal preference dataset (e.g. 1k pairs) and then train on top to build a robust IQA model.
+That's where JoyQuality steps in.  JoyQuality was trained on a broad, diverse array of images and 100k carefully selected pairwise preferences, while also being tuned across a range of metrics to ensure robust performance.  By using JoyQuality as your base model, you can quickly build a small personal preference dataset (e.g. 1k pairs) and then train on top to build a robust IQA model.
 
-As an example, on my own personal preference dataset (which was completely excluded from JoyQuality's training), JoyQuality _starts_ at 75% accuracy and finishes at 80% accuracy in only 77 steps (256 batch size).  All while also maintaining robust AURC, Brier, ECE metrics, and >98% accuracy on simple JPEG and low-resolution tasks.  (Performance on the latter two tasks is easy to lose on poorly trained models).
+As an example, on my own personal preference dataset (which was completely excluded from JoyQuality's training), JoyQuality _starts_ at 75% accuracy and finishes at 80% accuracy in only 77 steps (256 batch size).  All while also maintaining robust AURC, Brier, ECE metrics, and >98% accuracy on simple JPEG and low-resolution tasks.  (Performance on the latter two tasks is easy to lose on poorly trained models).  When trained from so400m-512 directly instead of JoyQuality, various robustness metrics such as the JPEG and low resolution tasks only got to 90% and 80% respectively.
 
 
 ## The Model
 
-JoyQuality is built on top of SigLIP2's so400m-512 model.  This is an exceptionally well trained model from Google, similar to OpenAI's CLIP, but with much better finetuning dynamics.  Unlike older Aesthetic models like the ones used for SD1.5 and SDXL, JoyQuality has an input resolution of 512x512, enabling it to see and differnetiate small details.
+JoyQuality is built on top of SigLIP 2's so400m-512 model.  This is an exceptionally well trained vision model from Google, similar to OpenAI's CLIP, but with much better finetuning dynamics.  Unlike older Aesthetic models like the ones used for SD1.5 and SDXL, JoyQuality has an input resolution of 512x512, enabling it to see and differnetiate small details.
 
 During training, both JPEG and low-resolution validation tasks were measured.  These tasks were built by taking the set of validation images and corrupting them, building simple pairs of original-vs-corrupt pairs to test the model against.  For JPEG corruption, the image is compressed until it loses at least 70% of its information.  For resolution corruption, images are downscaled to between 50% and 90% of its original size, before being scaled back up using a randomly selected upscaling algorithm.  This simple benchmark is able to quickly differentiate models with a low input resolution (such as CLIP's 224 or 336), which struggle especially with the low resolution test.  JoyQuality, however, achieves over 99% accuracy.
 
-Using the so400m architecture also gives JoyQuality plenty of general performance compared to smaller models like CLIP-L or CLIP-B.  so400m outperformed both SigLIP-B and SigLIP-L in my ablation tests, with so400m achieving 80% accuracy compared to SigLIP-B's 70%.
+Using the so400m architecture also gives JoyQuality plenty of general performance compared to smaller models like CLIP-L or CLIP-B.  so400m outperformed both SigLIP-B and SigLIP-L in my ablation tests, with so400m achieving 80% accuracy compared to SigLIP-B's 70%, while being faster than SigLIP-L.
 
-Despite being 400M parameters and high resolution (512x512), JoyQuality's processing speed is _fast_.  On a 300W H100 I was able to run the model in inference mode at 204 images/s.  Just 24 hours to process through the 14M images of bigASP 2.5's dataset.
+Despite being 400M parameters and high resolution (512x512), JoyQuality's processing speed is _fast_.  On a 300W H100 I was able to run the model in inference mode at 204 images/s.  Just 19 hours to process through the 14M images of bigASP 2.5's dataset.
 
 Finally, the so400m architecture doesn't crop input images, unlike CLIP, which means JoyQuality sees the _entire_ image regardless of aspect ratio.
 
@@ -79,7 +81,7 @@ For the current training script you need your dataset in this format:
 }
 ```
 
-Basically two paths for each entry plus a label.  **For now the training script only supports the winning image being the first image and it ignores the label.**  Your images don't have to be a particular size/format/etc, as long as PIL can load them.  The general rule of thumb is to have 10% test data.
+Basically two paths for each entry plus a label.  **For now the training script only supports the winning image being the first image, and the losing image being the second, and it ignores the label.**  Your images don't have to be a particular size/format/etc, as long as PIL can load them.  The general rule of thumb is to have 10% test data.
 
 Then you can run the training script like this:
 
@@ -87,11 +89,11 @@ Then you can run the training script like this:
 
 Those are the settings I found to work best for my personal preference dataset which has about 6k pairs in it.  The model both learns quickly and overfits quickly, so if your dataset is smaller definitely decrease `total_samples`.  You'll want to adjust `device_batch_size` based on how much GPU memory you have (it doesn't have any effect on the real batch size; the script automatically accumulates to reach the target).
 
-`cosine` schedule is the "standard", but at least in my case `onecycle` edge out ahead.  One Cycle tends to work quite well for low data, high repeat regimes.  Though expect to adjust the learning rate if you switch the schedule.
+`cosine` schedule is the "standard", but at least in my case `onecycle` edged out ahead.  One Cycle tends to work quite well for low data, high repeat regimes.  Though expect to adjust the learning rate if you switch the schedule.
 
 ### Inference
 
-The [score_images.py](./score_images.py) script gives an example of how to use the model during inference.  In my case I use a SQL database to keep track of everything, so the script is set up that way.  But your setup will likely be different.  Adjust as needed.
+The [score-images.py](./score-images.py) script gives an example of how to use the model during inference.  In my case I use a SQL database to keep track of everything, so the script is set up that way.  But your setup will likely be different.  Adjust as needed.
 
 The model outputs a "latent score" for each image.  I'll just call it the image's score.  It's an unscaled, unbiased number, which means it doesn't really "mean" anything out of context.  You can compare two images by doing:
 
@@ -101,7 +103,7 @@ That results in a value between 0.0 and 1.0 which represent the probability that
 
 If you have a dataset of images you can also use the scores to just directly rank them all from best to worst.  Just sort by their scores.  The best image will have the highest score; the worst the lowest.
 
-Many text-to-image diffusion training processes want images graded into things like "worst quality", "low quality", "average quality", "high quality", "best quality", etc.  You can use the score to do this as well!  To do that you just have to break up the range of scores in your dataset into distinct buckets from best to worst.  So, first score all your images.  Then use one of two approaches to convert the scores into discrete "ranks."
+Many text-to-image diffusion training processes want images graded into discrete levels like "worst quality", "low quality", "average quality", "high quality", "best quality", etc.  You can use the score to do this as well!  You just have to break up the range of scores in your dataset into distinct buckets from best to worst.  First score all your images.  Then use one of two approaches to convert the scores into discrete "ranks."
 
 #### Ranking Method A
 
@@ -117,7 +119,7 @@ So, method B uses this equation to calculate the rank of an image from its score
 
 `rank = 10 * (1 / (1 + torch.exp(-(s - b) / tau)))`
 
-Where `s` is the score, and `b` and `tau` are parameters that get tuned to your specific dataset.  They're basically "scale" and "offset" variables.  What you'll need to tune those two parameters is a small validation set of preferences.  If you finetuned JoyQuality you can use the test set from there.  Otherwise just use a random subset of your dataset.  The optimization is the same as during finetuning, pushing the model to match your dataset's preferences, except now it's working to optimize tau.  After that `b` is found using a simple search.  All of this basically helps to calibrate the scores post-training and fit them into a global range of (0, 1).
+Where `s` is the score, and `b` and `tau` are parameters that get tuned to your specific dataset.  They're basically "scale" and "offset" variables.  You'll need a small validation set of preferences to tune those parameters.  If you finetuned JoyQuality you can use the test set from there.  Otherwise just use a random subset of your dataset.  The optimization is the same as during finetuning, pushing the model to match your dataset's preferences, except now it's working to optimize tau.  After that `b` is found using a simple search.  All of this basically helps to calibrate the scores post-training and fit them into a global range of (0, 1).
 
 After tuning `tau` and `b` you can use the formula above, which will spit out a continuous rank between 0 and 10 for each image.  You can divide that up however you'd like.  In my case I have ten quality buckets, so I just do `int(rank)` and get ranks [0, 9] inclusive, which I later convert to text labels.
 
@@ -234,7 +236,7 @@ Image Quality Assessment (IQA) is a whole field, and there are many pre-existing
 ## How It Was Built
 
 ### The Dataset
-JoyQuality's approach is to act as a base model.  It does not itself need to be the absolute "best" model in terms of accuracy, since end users are expected to do a quick fine tune on their own, much smaller, dataset.  But it does need to be a robust base, so that it can quickly adapt to new data.
+JoyQuality's approach is to act as a base model.  It does not itself need to be the absolute "best" model in terms of accuracy, since end users are expected to do a quick finetune on their own, much smaller, dataset.  But it does need to be a robust base, so that it can quickly adapt to new data.
 
 So this defines our parameters for JoyQuality's dataset.  To make the model adaptable and robust, the dataset needs to be diverse, balanced, and well constructed.  But the accuracy of the pairwise comparisons themselves is less important.
 
@@ -248,9 +250,9 @@ NOTE: I'm not sure if this is an _ideal_ approach yet, but the theory makes some
 
 With a solid, well built set of images and pairings in hand we have accomplished the most crucial part of JoyQuality's dataset.  Now for the actual preference data!  As established earlier, it wasn't critical that these be of the highest possible accuracy.  The approach is rather _quantity_ over quality, since quantity helps make the model more robust and adaptable.
 
-Using a set of preferences I built by hand I was able to run a large scale experiment I called the "Model Agreement" experiment.  This is where I run that small set of pairings through all of the public SOTA vision capable LLMs, using a well crafted prompt.  I could then measure what percentage of the time those models agreed with my own preferences.  In other words, this allowed me to assess systematically which of these LLMs was the strongest at this particular task.  I tested various models from Qwen, OpenAI, Google, and Anthropic.  GPT-5 mini (minimal or low thinking) was by far the best (better than the normal GPT-5).  Which is nice, because it is extremely cheap.  About $0.002 USD per call for this use.  Meaning just $200 to build a dataset of 100k prefences.
+Using a set of preferences I built by hand I was able to run a large scale experiment I called the "Model Agreement" experiment.  This is where I run that small set of pairings through all of the public SOTA vision capable LLMs, using a well crafted prompt.  I could then measure what percentage of the time those models agreed with my own preferences.  In other words, this allowed me to assess systematically which of these LLMs was the strongest at this particular task.  I tested various models from Qwen, OpenAI, Google, and Anthropic.  GPT-5 mini (minimal or low thinking) was by far the best (better than the normal GPT-5).  Which is nice, because it is extremely cheap.  About $0.002 USD per call for this use.  Meaning just $200 to build a dataset of 100k preferences.
 
-In addition to finding the best performing LLM, I also spent a good amount of time refining the prompt used.  To assist in this process I did an AI assisted prompt refinement loop.  This is where I ran the current prompt through Model Agreement to measure its performance, and then had an big LLM edit the prompt to try and improve the performance.  At each step of the loop the big LLM is given all previous prompts along with their performances, thus enabling it to "optimize" the prompt by experimenting and seeing what affects performance.  (N.B. At each loop I changed the set of preferences used for Model Agreement to prevent reward hacking).  Importantly every prompt includes instructions to output not only the preference, but the _reason_ for the preference.  I could then include from of these "reasoning traces" along with the prompt's performance, enabling the big LLM to hopefully have deeper insight into exactly _where_ and _why_ the current prompt is failing.
+In addition to finding the best performing LLM, I also spent a good amount of time refining the prompt used.  To assist in this process I did an AI assisted prompt optimization loop.  This is where I ran the current prompt through Model Agreement to measure its performance, and then had a big LLM edit the prompt to try and improve the performance.  At each step of the loop the big LLM is given all previous prompts along with their performances, thus enabling it to "optimize" the prompt by experimenting and seeing what affects performance.  (N.B. At each loop I changed the set of preferences used for Model Agreement to prevent reward hacking).  Importantly every prompt includes instructions to output not only the preference, but the _reason_ for the preference.  I could then include some of these "reasoning traces" along with the prompt's performance, enabling the big LLM to hopefully have deeper insight into exactly _where_ and _why_ the current prompt is failing.
 
 This prompt optimization process is very helpful when your runtime model is small (which, in this case, GPT-5 mini is).  The bigger models like GPT-5 Thinking and Claude Sonnet 4.5 are much, much better at infering things about your instructions.  So using them to expand upon a prompt and make it more detailed helps a lot in getting performance out of the smaller models.
 
@@ -260,9 +262,9 @@ Much compute later and the dataset was ready.
 
 ### Training
 
-I spent a long time A-B testing various models to finetune JoyQuality from: various CLIPs, SigLIPs, OWLv2, and DINOv3.  For each one I spent time optimzing hyperparameters so they all performed their best.  All in all, so400m came out on top.  DINOv3 has a larger base resolution (>1024x1024) but just didn't perform as well as even CLIP (with a much smaller resolution).  The same goes for OWLv2, which I suspect is because it was heavily tuned for object recognition, so its quality signals likely died off.
+I spent a long time A-B testing various models to finetune JoyQuality from: various CLIPs, SigLIPs, OWLv2, and DINOv3.  For each one I spent time optimzing hyperparameters so they all performed their best.  All in all, so400m came out on top.  DINOv3 has a larger base resolution (>1024x1024) but just didn't perform as well as even CLIP (with a much smaller resolution).  The same goes for OWLv2, which I suspect is because it was heavily tuned for object recognition, killing off its quality signals.
 
-In addition to picking the strongest pretrained model I also evaluated different architecture tweaks.  All of these models output an embedding, so in all cases at least a new head had to be inserted to project from the embedding to a scalar.  But there are many ways to do this: add a new layer at the end, replace the existing head, etc.  And when adding a new head, the head could be a simple linear projection, an MLP, a transformer layer, etc.  The best performing was simply a linear projection.  This makes sense, but it was worth double checking.
+In addition to picking the strongest pretrained model I also evaluated different architecture tweaks.  All of these models output an embedding, so in all cases at least a new head had to be inserted to project from the embedding to a score scalar.  But there are many ways to do this: add a new layer at the end, replace the existing head, etc.  And when adding a new head, the head could be a simple linear projection, an MLP, a transformer layer, etc.  The best performing was simply a linear projection.  This makes sense, but it was worth double checking.
 
 I also did some experiments on CLIP where I would replace/retrain its input layer to handle larger resolutions.  None of these panned out after some work.  (It's certainly possible, but I think it would require more data and more work).
 
@@ -278,12 +280,12 @@ Once the base model was picked (SigLIP 2 so400m-512/16), I spent even more time 
 
 ### Results
 
-I added many, many metrics to try and monitor the "overall" performance of the model.  Accuracy alone is a rather shallow metric, so I wanted to keep my eye on other things.  You can view all of the graphed results here: https://api.wandb.ai/links/hungerstrike/bdka9qid
+I added many, many metrics to monitor the "overall" performance of the model.  Accuracy alone is a rather shallow metric, so I wanted to keep my eye on other things.  You can view all of the graphed results here: https://api.wandb.ai/links/hungerstrike/bdka9qid
 
-The "weighted" variations are weighted based on CLIP distance between the pairs, so they should be more "balanced" and representative of performance in practice.  (This was needed because the dataset skews towards close pairs, whereas real world datasets won't.)
-lowres_accuracy tests the model's ability to score low resolution images lower.  Similar for jpeg_accuracy.
-Spearman Rho tests the model's ability to actually rank images.  I took a small part of the validation dataset and ran more pairwise comparisons on them until they could be perfectly ranked from best to worst.  The model does the same, and those ranked lists are compared.  This is a useful metrics for saying "Okay, the model only has X accuracy on head-to-head comparisons, but how well does it do at overall ranking, even if individual pairs aren't perfect?"
-Kendall Tau does a similar ranking-vs-ranking test, but pays more attention to the local structure of the ranking.
-ECE is an odd metric, but generally should be low.  If it grows it means the model is becoming overconfident.
-The rest of the metrics ... I dunno good interpretations of them honestly.  I found the dec_* metrics to be useless.  Brier is kind of a better accuracy measure, but I didn't look too closely at it.
-Overall I just liked to see NLL going down, ECE low, Accuracy high, and Spearman high.
+* The "weighted" variations are weighted based on CLIP distance between the pairs, so they should be more "balanced" and representative of performance in practice.  (This was needed because the dataset skews towards close pairs, whereas real world datasets won't.)
+* lowres_accuracy tests the model's ability to score low resolution images lower.  Similar for jpeg_accuracy.
+* Spearman Rho tests the model's ability to actually rank images.  I took a small part of the validation dataset and ran more pairwise comparisons on them until they could be perfectly ranked from best to worst.  The model does the same, and those ranked lists are compared.  This is a useful metrics for saying "Okay, the model only has X accuracy on head-to-head comparisons, but how well does it do at overall ranking, even if individual pairs aren't perfect?"
+* Kendall Tau does a similar ranking-vs-ranking test, but pays more attention to the local structure of the ranking.
+* ECE is an odd metric, but generally should be low.  If it grows it means the model is becoming overconfident.
+* The rest of the metrics ... I dunno good interpretations of them honestly.  I found the dec_* metrics to be useless.  Brier is kind of a better accuracy measure, but I didn't look too closely at it.
+* Overall I just liked to see NLL going down, ECE low, Accuracy high, and Spearman high.
