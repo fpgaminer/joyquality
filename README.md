@@ -2,13 +2,25 @@
 
 JoyQuality is an open source Image Quality Assessment (IQA) model.  It takes as input an image and gives as output a scalar score representing the overall quality of the image.  Highlights:
 
-* Use for image dataset filtering.
-* Use for image quality tagging, such as for training text-to-image models.
+* Can be used for image dataset filtering.
+* Can be used for image quality tagging, such as for training text-to-image models.
 * Input size of 512x512.
 * 400M parameters.
 * Fast (200 images/s on a 300W H100).
-* A diverse and balanced dataset to ensure robust and adaptability.
-* Quickly learns new, tiny preference datasets.
+* Can be quickly finetuned on your own preference dataset.
+
+
+## Downloads
+
+* Base model: https://huggingface.co/fancyfeast/joyquality-siglip2-so400m-512-16-o8eg1n4c
+* My personal finetune on top of Base: https://huggingface.co/fancyfeast/joyquality-siglip2-so400m-512-16-05k047vn
+
+
+## Quick Start
+
+I highly recommend finetuning JoyQuality on your own set of preference data.  That's what it's built for.  Check the more extensive usage guide below for more details.  Otherwise:
+
+Check the [score-images.py](./score-images.py) script for example usage.  The model can be loaded as `SiglipForImageClassification`, but the `forward` method needs to be replaced for it to function correctly.  The model expects input images to be resized to 512x512 (disregarding aspect ratio) using BICUBIC and normalized using mean 0.5 and std 0.5.
 
 
 ## What's Cool About JoyQuality
