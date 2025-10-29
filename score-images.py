@@ -10,9 +10,10 @@ from pathlib import Path
 import psycopg
 import random
 import torch.nn as nn
-from transformers import AutoModel
+from transformers import AutoModel, SiglipForImageClassification
 import torchvision.transforms.functional as TVF
 from torch.utils.data import Dataset, DataLoader
+import types
 
 
 PIL.Image.MAX_IMAGE_PIXELS = 933120000
@@ -20,6 +21,7 @@ PIL.Image.MAX_IMAGE_PIXELS = 933120000
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--batch-size", type=int, default=128)
+parser.add_argument("--model", type=str, default="fancyfeast/joyquality-siglip2-so400m-512-16-o8eg1n4c")
 
 
 @torch.inference_mode()
@@ -27,10 +29,9 @@ def main():
 	args = parser.parse_args()
 
 	# Load model
-	model = So400m512(dropout=0.0)
-	model.load_state_dict(torch.load("checkpoints/05k047vn/latest.pt"))
-	model.requires_grad_(False)
+	model = SiglipForImageClassification.from_pretrained(args.model, dtype=torch.float32)
 	model.eval()
+	model.forward = types.MethodType(joyquality_forward, model)
 	model = model.to("cuda")
 	model = torch.compile(model)
 
@@ -50,8 +51,7 @@ def main():
 	with psycopg.connect(dbname='postgres', user='postgres', host=str(Path.cwd().parent / "pg-socket")) as conn, conn.cursor() as cur, tqdm(total=len(paths), desc="Scoring images...", dynamic_ncols=True) as pbar:
 		for i, pixel_values in enumerate(dataloader):
 			# Run through the model
-			with torch.amp.autocast("cuda", dtype=torch.bfloat16): # type: ignore
-				scores = model(pixel_values.to("cuda", non_blocking=True))
+			scores = model(pixel_values.to("cuda", non_blocking=True))
 			
 			scores = scores.detach().float().cpu().tolist()
 			cur.executemany("UPDATE images SET bt_score = %s WHERE path = %s", 
@@ -61,20 +61,10 @@ def main():
 			pbar.update(len(scores))
 
 
-class So400m512(nn.Module):
-	def __init__(self, dropout: float):
-		super(So400m512, self).__init__()
-
-		self.clip_model = AutoModel.from_pretrained("google/siglip2-so400m-patch16-512", dtype=torch.float32)
-		self.clip_model = self.clip_model.vision_model
-		self.head = nn.Sequential(
-			nn.Dropout(dropout),
-			nn.Linear(self.clip_model.config.hidden_size, 1, bias=True),
-		)
-	
-	def forward(self, x: torch.Tensor) -> torch.Tensor:
-		embedding = self.clip_model(x).pooler_output
-		return self.head(embedding).squeeze(-1)
+def joyquality_forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
+	with torch.amp.autocast("cuda", dtype=torch.bfloat16): # type: ignore
+		embedding = self.vision_model(pixel_values).pooler_output
+		return self.classifier(embedding).squeeze(-1)
 
 
 class ImageDataset(Dataset):
